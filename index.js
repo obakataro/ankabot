@@ -68,17 +68,6 @@ const commands = [
     .setDescription("メニューを表示する")
 ].map(c => c.toJSON());
 
-// 起動時
-client.once(Events.ClientReady, async () => {
-  console.log(`Logged in as ${client.user.tag}`);
-
-  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
-  await rest.put(Routes.applicationCommands(process.env.APP_ID), {
-    body: commands
-  });
-
-  console.log("✔ Slash commands registered");
-});
 
 // ───────────────────────────
 // コマンド処理
