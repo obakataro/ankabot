@@ -25,9 +25,10 @@ const client = new Client({
 // ────────────────
 let isAnkaRunning = false;
 let ankaChannel = null;
+let ankaStartMessage = null;
 let currentTopic = "";
 let targetCounts = [];          // 例: [10, 15]
-let currentCount = 0;           // 何個目のメッセージか
+let currentCount = 0;           // 現在のメッセージ数
 let collected = {};             // {10: message, 15: message}
 
 // ────────────────
@@ -96,12 +97,14 @@ client.on(Events.InteractionCreate, async interaction => {
     currentCount = 0;
     collected = {};
 
-    await interaction.reply(
+    const sent = await interaction.reply(
       `🎯 **安価を開始しました！**\n\n` +
       `📌 お題：**${currentTopic}**\n` +
       `📍 カウントする番号：**${targetCounts.join(", ")}**\n\n` +
       `※このチャンネルでのユーザーの発言のみカウントします。`
     );
+
+    ankaStartMessage = await interaction.fetchReply();
   }
 
   // --- /stop ---
@@ -161,41 +164,28 @@ client.on(Events.MessageCreate, async msg => {
 
   currentCount++;
 
-  // まだ対象番号じゃない
+  // 対象番号じゃない
   if (!targetCounts.includes(currentCount)) return;
 
-  // 安価確定
   collected[currentCount] = msg;
 
-  await msg.reply(
-    `📌 **${currentCount} 安価を踏みました！**\n\n` +
-    `投稿者：${msg.author}\n` +
-    `内容：\n> ${msg.content}\n\n` +
+  // 名前 + さん にする
+  const displayName = msg.member?.displayName || msg.author.username;
+  const authorName = `${displayName}さん`;
+
+  // スタートメッセージへの返信
+  await ankaStartMessage.reply(
+    `📍 **${currentCount} 安価を踏みました！**\n\n` +
+    `投稿者：**${authorName}**\n` +
+    `内容：\n${msg.content}\n\n` +
     `🔗 [メッセージリンク](${msg.url})`
   );
 
-  // 全部集まった？
+  // 全て揃った？
   if (Object.keys(collected).length === targetCounts.length) {
-    await sendFinalResult();
     resetState();
   }
 });
-
-// ────────────────
-// 結果メッセージ
-// ────────────────
-async function sendFinalResult() {
-  let text = "⏹️ **安価終了！**\n\n今回の結果はこちら👇\n";
-
-  for (const num of targetCounts) {
-    const m = collected[num];
-    if (m) {
-      text += `\n・${num}安価：${m.author} →「${m.content}」`;
-    }
-  }
-
-  await ankaChannel.send(text);
-}
 
 // ────────────────
 // ユーティリティ
@@ -211,6 +201,7 @@ function remainingTargets() {
 function resetState() {
   isAnkaRunning = false;
   ankaChannel = null;
+  ankaStartMessage = null;
   currentTopic = "";
   targetCounts = [];
   currentCount = 0;
