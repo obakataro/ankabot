@@ -112,7 +112,7 @@ client.on(Events.InteractionCreate, async interaction => {
     st.results = {};
 
     await interaction.reply(
-      `🎯 **安価スタート！（このチャンネル専用）**\n\n` +
+      `🎯 **安価スタート！**\n\n` +
       `📌 お題：**${topic}**\n` +
       `📍 カウント：**${targets.join(", ")}**\n`
     );
