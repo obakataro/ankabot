@@ -20,20 +20,32 @@ const client = new Client({
   ]
 });
 
-// ────────────────
-// 状態
-// ────────────────
-let isAnkaRunning = false;
-let ankaChannel = null;
-let ankaStartMessage = null;
-let currentTopic = "";
-let targetCounts = [];          // 例: [10, 15]
-let currentCount = 0;           // 現在のメッセージ数
-let collected = {};             // {10: message, 15: message}
+// ───────────────────────────
+// 複数チャンネル用の状態管理
+// state[channelId] = { ... }
+// ───────────────────────────
+const state = {};  
 
-// ────────────────
+function initChannel(channelId) {
+  state[channelId] = {
+    isRunning: false,
+    topic: "",
+    targetCounts: [],
+    currentCount: 0,
+    results: {}
+  };
+}
+function getState(channelId) {
+  if (!state[channelId]) initChannel(channelId);
+  return state[channelId];
+}
+function resetChannel(channelId) {
+  initChannel(channelId);
+}
+
+// ───────────────────────────
 // スラッシュコマンド
-// ────────────────
+// ───────────────────────────
 const commands = [
   new SlashCommandBuilder()
     .setName("anka")
@@ -49,16 +61,14 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("stop")
-    .setDescription("安価を停止する"),
+    .setDescription("このチャンネルの安価を停止する"),
 
   new SlashCommandBuilder()
     .setName("menu")
     .setDescription("メニューを表示する")
 ].map(c => c.toJSON());
 
-// ────────────────
-// 起動時：コマンド登録
-// ────────────────
+// 起動時
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -67,152 +77,150 @@ client.once(Events.ClientReady, async () => {
     body: commands
   });
 
-  console.log("Slash commands registered.");
+  console.log("✔ Slash commands registered");
 });
 
-// ────────────────
-// スラッシュコマンド実行
-// ────────────────
+// ───────────────────────────
+// コマンド処理
+// ───────────────────────────
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
 
-  // --- /anka ---
+  const ch = interaction.channel.id;
+  const st = getState(ch);
+
+  // /anka
   if (interaction.commandName === "anka") {
-    currentTopic = interaction.options.getString("topic");
+    const topic = interaction.options.getString("topic");
     const countStr = interaction.options.getString("count");
 
-    targetCounts = countStr
+    const targets = countStr
       .split(",")
       .map(n => Number(n.trim()))
       .filter(n => !isNaN(n))
       .sort((a, b) => a - b);
 
-    if (targetCounts.length === 0) {
-      return interaction.reply("⚠️ 安価番号の入力が正しくありません。例: `10,15`");
+    if (targets.length === 0) {
+      return interaction.reply("⚠️ 正しい安価番号を指定してね！（例: 10,15）");
     }
 
-    // 状態初期化
-    isAnkaRunning = true;
-    ankaChannel = interaction.channel;
-    currentCount = 0;
-    collected = {};
+    // ステート初期化
+    st.isRunning = true;
+    st.topic = topic;
+    st.targetCounts = targets;
+    st.currentCount = 0;
+    st.results = {};
 
-    const sent = await interaction.reply(
-      `🎯 **安価を開始しました！**\n\n` +
-      `📌 お題：**${currentTopic}**\n` +
-      `📍 カウントする番号：**${targetCounts.join(", ")}**\n\n` +
-      `※このチャンネルでのユーザーの発言のみカウントします。`
+    await interaction.reply(
+      `🎯 **安価スタート！（このチャンネル専用）**\n\n` +
+      `📌 お題：**${topic}**\n` +
+      `📍 カウント：**${targets.join(", ")}**\n`
     );
-
-    ankaStartMessage = await interaction.fetchReply();
   }
 
-  // --- /stop ---
+  // /stop
   if (interaction.commandName === "stop") {
-    resetState();
-    await interaction.reply("⏹️ 安価を停止しました。");
+    resetChannel(ch);
+    await interaction.reply("⏹️ このチャンネルの安価を停止しました。");
   }
 
-  // --- /menu ---
+  // /menu
   if (interaction.commandName === "menu") {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("stop")
+        .setCustomId("stop_ch")
         .setLabel("⏹ 停止")
         .setStyle(ButtonStyle.Danger),
+
       new ButtonBuilder()
-        .setCustomId("status")
+        .setCustomId("status_ch")
         .setLabel("📄 状態確認")
         .setStyle(ButtonStyle.Secondary)
     );
 
     await interaction.reply({
-      content: "⚙️ **メニュー**",
+      content: "⚙️ **メニュー（このチャンネルのみ操作）**",
       components: [row],
       ephemeral: true
     });
   }
 
-  // --- ボタン：停止 ---
+  // ボタン操作
   if (interaction.isButton()) {
-    if (interaction.customId === "stop") {
-      resetState();
-      await interaction.reply({ content: "⏹️ 安価を停止しました。", ephemeral: true });
+    if (interaction.customId === "stop_ch") {
+      resetChannel(ch);
+      return interaction.reply({ content: "⏹️ 安価を停止しました。", ephemeral: true });
     }
 
-    if (interaction.customId === "status") {
-      await interaction.reply({
+    if (interaction.customId === "status_ch") {
+      return interaction.reply({
         content:
-          `📄 **現在の状態**\n\n` +
-          `安価中：${isAnkaRunning ? "🟢 はい" : "🔴 いいえ"}\n` +
-          `お題：${currentTopic || "なし"}\n` +
-          `次にカウントする番号：${nextTarget()}\n` +
-          `残り：${remainingTargets().join(", ") || "なし"}`,
+          `📄 **状態（このチャンネル）**\n` +
+          `安価中：${st.isRunning ? "🟢 はい" : "🔴 いいえ"}\n` +
+          `お題：${st.topic || "なし"}\n` +
+          `次の番号：${st.targetCounts.find(n => n > st.currentCount) || "なし"}`,
         ephemeral: true
       });
     }
   }
+
 });
 
-// ────────────────
-// メッセージカウント
-// ────────────────
+// ───────────────────────────
+// メッセージカウント（チャンネルごと）
+// ───────────────────────────
 client.on(Events.MessageCreate, async msg => {
-  if (!isAnkaRunning) return;
+  const ch = msg.channel.id;
+  const st = getState(ch);
+
+  if (!st.isRunning) return;
   if (msg.author.bot) return;
-  if (msg.channel.id !== ankaChannel?.id) return;
 
-  currentCount++;
+  st.currentCount++;
 
-  // 対象番号じゃない
-  if (!targetCounts.includes(currentCount)) return;
+  if (!st.targetCounts.includes(st.currentCount)) return;
 
-  collected[currentCount] = msg;
+  // 保存（必要最小限）
+  st.results[st.currentCount] = {
+    authorId: msg.author.id,
+    content: msg.content,
+    url: msg.url
+  };
 
-  // 名前 + さん にする
-  const displayName = msg.member?.displayName || msg.author.username;
-  const authorName = `${displayName}さん`;
-
-  // スタートメッセージへの返信
-  await ankaStartMessage.reply(
-    `📍 **${currentCount} 安価を踏みました！**\n\n` +
-    `投稿者：**${authorName}**\n` +
-    `内容：\n${msg.content}\n\n` +
+  await msg.reply(
+    `📌 **${st.currentCount} 安価！**\n` +
+    `投稿者：<@${msg.author.id}>\n` +
+    `内容：\n> ${msg.content}\n` +
     `🔗 [メッセージリンク](${msg.url})`
   );
 
-  // 全て揃った？
-  if (Object.keys(collected).length === targetCounts.length) {
-    resetState();
+  // 全て揃ったら結果送信
+  if (Object.keys(st.results).length === st.targetCounts.length) {
+    await sendFinal(msg.channel, st);
+    resetChannel(ch);
   }
 });
 
-// ────────────────
-// ユーティリティ
-// ────────────────
-function nextTarget() {
-  return targetCounts.find(n => n > currentCount) || "なし";
+// ───────────────────────────
+// 結果送信
+// ───────────────────────────
+async function sendFinal(channel, st) {
+  let text = `⏹️ **安価終了！（このチャンネル）**\n`;
+
+  for (const num of st.targetCounts) {
+    const r = st.results[num];
+    if (!r) continue;
+    text += `\n・${num}安価：<@${r.authorId}> →「${r.content}」`;
+  }
+
+  await channel.send(text);
 }
 
-function remainingTargets() {
-  return targetCounts.filter(n => n > currentCount);
-}
-
-function resetState() {
-  isAnkaRunning = false;
-  ankaChannel = null;
-  ankaStartMessage = null;
-  currentTopic = "";
-  targetCounts = [];
-  currentCount = 0;
-  collected = {};
-}
-
-// ────────────────
-// Express (Render keep-alive)
-// ────────────────
+// ───────────────────────────
+// Render keep-alive
+// ───────────────────────────
 const app = express();
-app.get("/", (req, res) => res.send("OK"));
+app.get("/", (_, res) => res.send("OK"));
 app.listen(process.env.PORT || 3000);
 
 client.login(process.env.DISCORD_TOKEN);
