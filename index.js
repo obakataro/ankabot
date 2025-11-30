@@ -1,4 +1,5 @@
 import "dotenv/config";
+import express from "express";
 import {
   Client,
   GatewayIntentBits,
@@ -19,66 +20,97 @@ const client = new Client({
   ]
 });
 
-// ====== 状態 ======
+// ────────────────
+// 状態
+// ────────────────
 let isAnkaRunning = false;
-let currentTopic = null;
 let ankaChannel = null;
+let currentTopic = "";
+let targetCounts = [];          // 例: [10, 15]
+let currentCount = 0;           // 何個目のメッセージか
+let collected = {};             // {10: message, 15: message}
 
-// ====== コマンド定義 ======
+// ────────────────
+// スラッシュコマンド
+// ────────────────
 const commands = [
   new SlashCommandBuilder()
     .setName("anka")
     .setDescription("安価を開始する")
-    .addStringOption(o =>
-      o.setName("topic").setDescription("お題を入力").setRequired(true)
+    .addStringOption(opt =>
+      opt.setName("topic").setDescription("お題").setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName("count")
+        .setDescription("安価番号(例: 10,15)")
+        .setRequired(true)
     ),
+
   new SlashCommandBuilder()
     .setName("stop")
     .setDescription("安価を停止する"),
+
   new SlashCommandBuilder()
     .setName("menu")
     .setDescription("メニューを表示する")
-].map(cmd => cmd.toJSON());
+].map(c => c.toJSON());
 
-// ====== コマンド登録（重複防止版） ======
+// ────────────────
+// 起動時：コマンド登録
+// ────────────────
 client.once(Events.ClientReady, async () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
-  const appId = process.env.APP_ID;
+  await rest.put(Routes.applicationCommands(process.env.APP_ID), {
+    body: commands
+  });
 
-  console.log("🧹既存のスラッシュコマンドを削除しています…");
-  await rest.put(Routes.applicationCommands(appId), { body: [] });
-
-  console.log("✨新しいコマンドを登録中…");
-  await rest.put(Routes.applicationCommands(appId), { body: commands });
-
-  console.log("🎉 登録完了！重複コマンドは消えたよ！");
+  console.log("Slash commands registered.");
 });
 
-// ====== コマンド処理 ======
+// ────────────────
+// スラッシュコマンド実行
+// ────────────────
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
 
-  // ----- /anka -----
+  // --- /anka ---
   if (interaction.commandName === "anka") {
-    const topic = interaction.options.getString("topic");
-    currentTopic = topic;
+    currentTopic = interaction.options.getString("topic");
+    const countStr = interaction.options.getString("count");
+
+    targetCounts = countStr
+      .split(",")
+      .map(n => Number(n.trim()))
+      .filter(n => !isNaN(n))
+      .sort((a, b) => a - b);
+
+    if (targetCounts.length === 0) {
+      return interaction.reply("⚠️ 安価番号の入力が正しくありません。例: `10,15`");
+    }
+
+    // 状態初期化
     isAnkaRunning = true;
     ankaChannel = interaction.channel;
+    currentCount = 0;
+    collected = {};
 
     await interaction.reply(
-      `🎯 **安価開始！**\nお題: **${topic}**\n\n次の発言が 1 安価になります！`
+      `🎯 **安価を開始しました！**\n\n` +
+      `📌 お題：**${currentTopic}**\n` +
+      `📍 カウントする番号：**${targetCounts.join(", ")}**\n\n` +
+      `※このチャンネルでのユーザーの発言のみカウントします。`
     );
   }
 
-  // ----- /stop -----
+  // --- /stop ---
   if (interaction.commandName === "stop") {
-    isAnkaRunning = false;
-    currentTopic = null;
-    ankaChannel = null;
+    resetState();
     await interaction.reply("⏹️ 安価を停止しました。");
   }
 
-  // ----- /menu -----
+  // --- /menu ---
   if (interaction.commandName === "menu") {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -92,45 +124,104 @@ client.on(Events.InteractionCreate, async interaction => {
     );
 
     await interaction.reply({
-      content: "メニュー：",
+      content: "⚙️ **メニュー**",
       components: [row],
       ephemeral: true
     });
   }
 
-  // ----- ボタン -----
+  // --- ボタン：停止 ---
   if (interaction.isButton()) {
     if (interaction.customId === "stop") {
-      isAnkaRunning = false;
-      currentTopic = null;
-      ankaChannel = null;
-      await interaction.reply({ content: "安価を停止しました！", ephemeral: true });
+      resetState();
+      await interaction.reply({ content: "⏹️ 安価を停止しました。", ephemeral: true });
     }
 
     if (interaction.customId === "status") {
       await interaction.reply({
         content:
           `📄 **現在の状態**\n\n` +
-          `安価中: ${isAnkaRunning ? "🟢 はい" : "🔴 いいえ"}\n` +
-          `お題: ${currentTopic ?? "なし"}`,
+          `安価中：${isAnkaRunning ? "🟢 はい" : "🔴 いいえ"}\n` +
+          `お題：${currentTopic || "なし"}\n` +
+          `次にカウントする番号：${nextTarget()}\n` +
+          `残り：${remainingTargets().join(", ") || "なし"}`,
         ephemeral: true
       });
     }
   }
 });
 
-// ====== 1安価処理 ======
+// ────────────────
+// メッセージカウント
+// ────────────────
 client.on(Events.MessageCreate, async msg => {
   if (!isAnkaRunning) return;
   if (msg.author.bot) return;
   if (msg.channel.id !== ankaChannel?.id) return;
 
-  // 受け取ったら即終了
-  isAnkaRunning = false;
+  currentCount++;
+
+  // まだ対象番号じゃない
+  if (!targetCounts.includes(currentCount)) return;
+
+  // 安価確定
+  collected[currentCount] = msg;
 
   await msg.reply(
-    `📝 **1 安価はこちら！**\n${msg.author}: ${msg.content}\n\n---\n安価終了しました。`
+    `📌 **${currentCount} 安価を踏みました！**\n\n` +
+    `投稿者：${msg.author}\n` +
+    `内容：\n> ${msg.content}\n\n` +
+    `🔗 [メッセージリンク](${msg.url})`
   );
+
+  // 全部集まった？
+  if (Object.keys(collected).length === targetCounts.length) {
+    await sendFinalResult();
+    resetState();
+  }
 });
+
+// ────────────────
+// 結果メッセージ
+// ────────────────
+async function sendFinalResult() {
+  let text = "⏹️ **安価終了！**\n\n今回の結果はこちら👇\n";
+
+  for (const num of targetCounts) {
+    const m = collected[num];
+    if (m) {
+      text += `\n・${num}安価：${m.author} →「${m.content}」`;
+    }
+  }
+
+  await ankaChannel.send(text);
+}
+
+// ────────────────
+// ユーティリティ
+// ────────────────
+function nextTarget() {
+  return targetCounts.find(n => n > currentCount) || "なし";
+}
+
+function remainingTargets() {
+  return targetCounts.filter(n => n > currentCount);
+}
+
+function resetState() {
+  isAnkaRunning = false;
+  ankaChannel = null;
+  currentTopic = "";
+  targetCounts = [];
+  currentCount = 0;
+  collected = {};
+}
+
+// ────────────────
+// Express (Render keep-alive)
+// ────────────────
+const app = express();
+app.get("/", (req, res) => res.send("OK"));
+app.listen(process.env.PORT || 3000);
 
 client.login(process.env.DISCORD_TOKEN);
